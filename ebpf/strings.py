@@ -122,6 +122,8 @@ def add_string(sorted_strings, addr, size=None) -> tuple[list, int]:
 
 def recover_known_strings(sorted_strings, symtab):
     _rodata = idaapi.get_segm_by_name(".rodata")
+    if not _rodata:
+        return sorted_strings
         
     strings_to_create = {}
 
@@ -130,18 +132,6 @@ def recover_known_strings(sorted_strings, symtab):
             l = s['size']
             if l > 0:
                 strings_to_create[s['val']] = l
-    
-    _data_rel_ro = idaapi.get_segm_by_name(".data.rel.ro")
-    start_ea = _data_rel_ro.start_ea
-    loopcount = _data_rel_ro.end_ea - start_ea
-
-    for addr in range(0, loopcount - 4, 4):
-        Addr = idaapi.get_dword(start_ea+addr)
-        l = idaapi.get_dword(start_ea+addr+4)
-        if l < 1024 and Addr + l < 2**32:
-            if Addr >= _rodata.start_ea and Addr <= _rodata.end_ea:
-                if Addr not in strings_to_create:
-                    strings_to_create[Addr] = l
     
     for k in strings_to_create.keys():
         if strings_to_create[k] > 0:

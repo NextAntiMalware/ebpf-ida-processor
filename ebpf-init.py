@@ -8,7 +8,7 @@ ida_procs_dir = pathlib.Path(__file__).parent.parent / 'procs'
 if ida_procs_dir not in sys.path:
     sys.path.append(str(ida_procs_dir))
 
-from solana.processor import EBPFProc
+from ebpf.processor import EBPFProc
 
 def PROCESSOR_ENTRY():
     return EBPFProc()

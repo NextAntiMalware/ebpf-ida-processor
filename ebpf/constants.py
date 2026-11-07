@@ -104,27 +104,6 @@ BPF_MOV = 0xb0
 BPF_ARSH = 0xc0
 ## BPF ALU/ALU64 operation code: endianness conversion.
 BPF_END = 0xd0
-## BPF ALU/ALU64 operation code: high or.
-BPF_HOR = 0xf0
-
-# Operation codes -- BPF_PQR class:
-#    7         6               5                               4       3          2-0
-# 0  Unsigned  Multiplication  Product Lower Half / Quotient   32 Bit  Immediate  PQR
-# 1  Signed    Division        Product Upper Half / Remainder  64 Bit  Register   PQR
-## BPF PQR operation code: unsigned high multiplication.
-BPF_UHMUL = 0x20
-## BPF PQR operation code: unsigned division quotient.
-BPF_UDIV = 0x40
-## BPF PQR operation code: unsigned division remainder.
-BPF_UREM = 0x60
-## BPF PQR operation code: low multiplication.
-BPF_LMUL = 0x80
-## BPF PQR operation code: signed high multiplication.
-BPF_SHMUL = 0xA0
-## BPF PQR operation code: signed division quotient.
-BPF_SDIV = 0xC0
-## BPF PQR operation code: signed division remainder.
-BPF_SREM = 0xE0
 
 # Operation codes -- BPF_JMP class:
 ## BPF JMP operation code: jump.
@@ -165,7 +144,6 @@ REL_TYPE = {
     2: 'R_BPF_64_ABS64',
     3: 'R_BPF_64_ABS32',
     4: 'R_BPF_64_NODYLD32',
-    8: 'R_BPF_64_RELATIVE', # SOLANA SPEC (https://github.com/solana-labs/llvm-project/blob/038d472bcd0b82ff768b515cc77dfb1e3a396ca8/llvm/include/llvm/BinaryFormat/ELFRelocs/BPF.def#L11)
     10: 'R_BPF_64_32'
 }
 
@@ -175,6 +153,5 @@ REL_PATCH_SIZE = {
     2: 64,
     3: 32,
     4: 32,
-    8: 32,
     10: 32
 }

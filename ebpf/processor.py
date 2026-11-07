@@ -5,6 +5,8 @@
 # some day, and you think this stuff is worth it, you can buy me a beer in
 # return.    Clement Berthaux
 # ----------------------------------------------------------------------------
+# Modified: Solana-specific features removed, generic eBPF only.
+# ----------------------------------------------------------------------------
 
 from idaapi import (PR_ASSEMBLE, PR_SEGS, PR_DEFSEG32, PR_USE32, PRN_HEX, PR_RNAMESOK, PR_NO_SEGMOVE,
                     ASH_HEXF3, AS_UNEQU, AS_COLON, ASB_BINF4, AS_N2CHR,
@@ -20,17 +22,18 @@ from idaapi import (PR_ASSEMBLE, PR_SEGS, PR_DEFSEG32, PR_USE32, PRN_HEX, PR_RNA
                     OOF_SIGNED, OOFS_NEEDSIGN, OOFW_IMM, OOFW_64, OOFW_32, OOFW_16)
 
 
-import rust_demangler
 import idaapi
 import idautils
+import idc
 import ctypes
 import os
 
-from solana.relocations import parse_relocation, process_relocations, apply_rel_mods, apply_relocation
-from solana.helpers import decode_name
-from solana.strings import add_string, recover_known_strings
-from solana.constants import *
-from solana.config import *
+from ebpf.relocations import parse_relocation, process_relocations, apply_rel_mods, apply_relocation
+from ebpf.helpers import decode_name
+from ebpf.strings import add_string, recover_known_strings
+from ebpf.constants import *
+from ebpf.helper_names import HELPER_NAMES
+from ebpf.config import *
 
 class DecodingError(Exception):
     pass
@@ -41,7 +44,7 @@ class EBPFProc(idaapi.processor_t):
     cnbits = 8
     dnbits = 8
     psnames = ['EBPF']
-    plnames = ['Solana VM']
+    plnames = ['eBPF Byte Code']
     segreg_size = 0
     instruc_start = 0
     assembler = {
@@ -92,7 +95,7 @@ class EBPFProc(idaapi.processor_t):
 
     def ev_loader_elf_machine(self, li, machine_type, p_procname, p_pd, loader, reader): # doesn't work from ida python for some reason
         if machine_type == 247:
-            p_procname = 'Solana VM'
+            p_procname = 'eBPF'
         return machine_type
     
     def ev_newfile(self, fname):
@@ -108,17 +111,6 @@ class EBPFProc(idaapi.processor_t):
         self.sorted_strings = recover_known_strings(self.sorted_strings, self.symtab)
         
         return True
-    
-    # callback from demangle_name
-    # since the default demangler in IDA takes C++ names,
-    # here we replace it with rust_demangler
-    # returns: [res_from_ev_demangle_name, outbuffer, res_from_demangle_name]
-    def ev_demangle_name(self, name, disable_mask, demreq):
-        try:
-            return [1, rust_demangler.demangle(name), 1] # use rust demangler
-        except Exception as e:
-            return [1, name, 1]
-
     
     ''' ----- Instructions processing -----'''
 
@@ -168,22 +160,6 @@ class EBPFProc(idaapi.processor_t):
             BPF_ALU | BPF_K | BPF_ARSH: ('arsh32', self._ana_reg_imm, CF_USE1|CF_USE2|CF_CHG1),
             BPF_ALU | BPF_X | BPF_ARSH: ('arsh32', self._ana_2regs, CF_USE1|CF_USE2|CF_CHG1),
 
-            BPF_PQR | BPF_K | BPF_LMUL: ('lmul32', self._ana_reg_imm, CF_USE1|CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_X | BPF_LMUL: ('lmul32', self._ana_2regs, CF_USE1 |CF_USE2|CF_CHG1),
-            # BPF_PQR | BPF_K | BPF_UHMUL: ('uhmul32', self._ana_reg_imm, CF_USE1 | CF_USE2),
-            # BPF_PQR | BPF_X | BPF_UHMUL: ('uhmul32', self._ana_2regs, CF_USE1 | CF_USE2),
-            BPF_PQR | BPF_K | BPF_UDIV: ('udiv32', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_X | BPF_UDIV: ('udiv32', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_K | BPF_UREM: ('urem32', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_X | BPF_UREM: ('urem32', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            # BPF_PQR | BPF_K | BPF_SHMUL: ('shmul32', self._ana_reg_imm, CF_USE1 | CF_USE2),
-            # BPF_PQR | BPF_X | BPF_SHMUL: ('shmul32', self._ana_2regs, CF_USE1 | CF_USE2),
-            BPF_PQR | BPF_K | BPF_SDIV: ('sdiv32', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_X | BPF_SDIV: ('sdiv32', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_K | BPF_SREM: ('srem32', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_X | BPF_SREM: ('srem32', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-
-
             BPF_ALU | BPF_K | BPF_END: ('le', self._ana_reg_imm, CF_USE1|CF_CHG1),
             BPF_ALU | BPF_X | BPF_END: ('be', self._ana_reg_imm, CF_USE1|CF_CHG1),
 
@@ -213,22 +189,6 @@ class EBPFProc(idaapi.processor_t):
             BPF_ALU64 | BPF_X | BPF_MOV: ('mov64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
             BPF_ALU64 | BPF_K | BPF_ARSH: ('arsh64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
             BPF_ALU64 | BPF_X | BPF_ARSH: ('arsh64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_ALU64 | BPF_K | BPF_HOR: ('hor64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1), # new, SOLANA SPEC?
-
-            BPF_PQR | BPF_B | BPF_K | BPF_LMUL: ('lmul64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_X | BPF_LMUL: ('lmul64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_K | BPF_UHMUL: ('uhmul64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_X | BPF_UHMUL: ('uhmul64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_K | BPF_UDIV: ('udiv64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_X | BPF_UDIV: ('udiv64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_K | BPF_UREM: ('urem64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_X | BPF_UREM: ('urem64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_K | BPF_SHMUL: ('shmul64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_X | BPF_SHMUL: ('shmul64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_K | BPF_SDIV: ('sdiv64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_X | BPF_SDIV: ('sdiv64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_K | BPF_SREM: ('srem64', self._ana_reg_imm, CF_USE1 | CF_USE2|CF_CHG1),
-            BPF_PQR | BPF_B | BPF_X | BPF_SREM: ('srem64', self._ana_2regs, CF_USE1 | CF_USE2|CF_CHG1),
 
             # BRANCHES
             BPF_JMP | BPF_JA: ('ja', self._ana_jmp, CF_USE1|CF_JUMP),
@@ -342,46 +302,42 @@ class EBPFProc(idaapi.processor_t):
         insn[1].reg = self.src
 
     def _ana_call(self, insn):
+        offset = ctypes.c_int32(self.imm).value
+
+        if self.src == 0:
+            # Linux eBPF：src_reg == 0 是 helper 调用，imm 是 helper id
+            insn[0].type = o_imm
+            insn[0].dtype = dt_dword
+            insn[0].value = offset
+            return
+
+        # src_reg != 0：bpf-to-bpf 调用，imm 是相对偏移（单位 8 字节）
         insn[0].type = o_near
-        insn[0].value = self.imm
         insn[0].dtype = dt_dword
+        insn[0].value = self.imm
+        insn[0].offb = 4
 
+        target = None
         if insn.ea in self.relocations:
-            extern_ea = idaapi.get_segm_by_name("extern").start_ea
-            target_addr = idaapi.get_name_ea(extern_ea, self.relocations[insn.ea]['name'])
-            if target_addr == idaapi.BADADDR:
-                target_addr = idaapi.get_name_ea(extern_ea, "__imp_" + self.relocations[insn.ea]['name'])
-                if target_addr == idaapi.BADADDR:
-                    target_addr = idaapi.get_name_ea(0, self.relocations[insn.ea]['name'])
-                    if target_addr == idaapi.BADADDR:
-                        insn[0].addr = idaapi.BADADDR
-                        return
-            
-            insn[0].addr = target_addr
+            r = self.relocations[insn.ea]
+            target = r.get('target')
+            name = r.get('name') or ''
+            if target is None and name:
+                target = self.functions.get(name)
+                if target is None:
+                    seg = idaapi.get_segm_by_name("extern")
+                    if seg is not None:
+                        target = idaapi.get_name_ea(seg.start_ea, name)
+                        if target == idaapi.BADADDR:
+                            target = idaapi.get_name_ea(0, name)
+                        if target == idaapi.BADADDR:
+                            target = None
 
-            if self.src == 0:
-                to_patch = target_addr // 8
-            elif self.src == 1:
-                to_patch = (target_addr - 8 - insn.ea) // 8
-            else:
-                to_patch = None
-                print("UNKNOWN CALL TYPE")
-            
-            if to_patch:
-                try:
-                    idaapi.patch_bytes(insn.ea + 4, to_patch.to_bytes(4, byteorder='little', signed=True))
-                except Exception as e:
-                    print(f"[{hex(insn.ea)}] Patching call at {hex(insn.ea)} to {hex(to_patch)} (original: {to_patch}) failed: {e}")
-        else:
-            offset = ctypes.c_int32(self.imm).value
-            if self.src == 0:
-                # call imm
-                insn[0].addr = 8 * offset
-            elif self.src == 1:
-                # tail call
-                insn[0].addr = 8 * offset + insn.ea + 8
-            else:
-                print("UNKNOWN CALL TYPE")
+        if target is None:
+            # 节符号/未解析符号：退回到相对偏移
+            target = insn.ea + 8 + 8 * offset
+
+        insn[0].addr = target
 
     def _ana_callx(self, insn):
         insn[0].type = o_reg
@@ -438,20 +394,6 @@ class EBPFProc(idaapi.processor_t):
         insn[1].dtype = dt_dword
         insn[1].reg = self.src
 
-    def _ana_regdisp_reg_atomic(self, insn):
-        insn[0].type = o_displ
-        insn[0].dtype = dt_word
-        insn[0].value = self.off
-        insn[0].phrase = self.dst
-
-        insn[1].type = o_reg
-        insn[1].dtype = dt_dword
-        insn[1].reg = self.src
-
-        insn[2].type = o_imm
-        insn[2].dtype = dt_dword
-        insn[2].value = self.imm
-
     def _ana_reg_regdisp(self, insn):
         insn[0].type = o_reg
         insn[0].dtype = dt_dword
@@ -462,23 +404,13 @@ class EBPFProc(idaapi.processor_t):
         insn[1].value = self.off
         insn[1].phrase = self.src
 
-        if self.opcode in [0x40, 0x48, 0x50, 0x58]:
-            insn[0].reg = 0 # hardcoded r0 destination
-            insn[1].value = self.imm # use imm not offset for displacement
-            insn[1].dtype = dt_dword # imm are 32-bit, off are 16-bit.
-
-
-    def _ana_phrase_imm(self, insn):
-        insn[0].type = o_reg
-        insn[0].dtype = dt_dword
-        insn[0].reg = 0 # hardcode destination to r0
-        
-        insn[1].type = o_phrase
-        insn[1].dtype = dt_dword
-        insn[1].value = self.imm
-
     def ev_emu_insn(self, insn):
         Feature = insn.get_canon_feature()
+
+        # helper 调用：把数字 id 注释成函数名（call 0x19 ; bpf_perf_event_output）
+        if insn.itype == 0x85 and insn[0].type == o_imm:
+            hid = insn[0].value & 0xffffffff
+            idc.set_cmt(insn.ea, HELPER_NAMES.get(hid, 'unknown helper 0x%x' % hid), 0)
 
         if Feature & CF_JUMP:
             dst_op_index = 0 if insn.itype == 0x5 else 2
@@ -503,7 +435,7 @@ class EBPFProc(idaapi.processor_t):
                 self.sorted_strings = apply_relocation(self.functions, self.rodata, self.sorted_strings, insn, self.relocations[insn.ea])
                 if self.relocations[insn.ea]['name'] == 'abort':
                     abort = True
-            else:
+            elif insn[0].type == o_near:
                 insn.add_cref(insn[0].addr, insn[0].offb, fl_CF)
 
         # continue execution flow if not stop instruction (exit), not abort, and not unconditional jump
@@ -539,30 +471,6 @@ class EBPFProc(idaapi.processor_t):
                 ctx.out_mnem(15, f"{cmd.ops[1].value}")
             else:
                 print("[ev_out_insn] analysis error: invalid 2nd operand type for byteswap instruction")
-        # special handling for atomic instruction, mnemonic is determined by immediate, not opcode
-        elif cmd.itype == 0xdb or cmd.itype == 0xc3:
-            atomic_alu_ops = [BPF_ADD, BPF_AND, BPF_OR, BPF_XOR]
-            atomic_alu_fetch_ops = [op | BPF_FETCH for op in atomic_alu_ops]
-            if cmd.ops[2].type == o_imm:
-                # TODO: add size/width to disassembly?
-                if cmd.ops[2].value in atomic_alu_ops:
-                    # first case; 'lock' instruction we first came across
-                    ctx.out_mnem(15, f" {bpf_alu_string[cmd.ops[2].value]}")
-                elif cmd.ops[2].value in atomic_alu_fetch_ops:
-                    print("[ev_out_insn] untested case for atomic instruction: ALU fetch op")
-                    ctx.out_mnem(15, f" fetch {bpf_alu_string[cmd.ops[2].value]}")
-                elif cmd.ops[2].value == BPF_CMPXCHG:
-                    print("[ev_out_insn] untested case for atomic instruction: CMPXCHG")
-                    ctx.out_mnem(15, " cmpxchg")
-                elif cmd.ops[2].value == BPF_XCHG:
-                    print("[ev_out_insn] untested case for atomic instruction: XCHG")
-                    ctx.out_mnem(15, " xchg")
-                else:
-                    print("[ev_out_insn] invalid operation type in immediate for atomic instruction")
-            else:
-                print("[ev_out_insn] analysis error: 3rd parameter for atomic instruction must be o_imm. debug me!")
-        elif ft & CF_CALL and idaapi.get_name(cmd.ea) and idaapi.get_name(cmd.ea).startswith('sol_'):
-            ctx.out_custom_mnem("syscall", 15)
         else:
             ctx.out_mnem(15)
         

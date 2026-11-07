@@ -1,45 +1,42 @@
-# IDA Pro Solana bytecode processor
+# eBPF IDA Processor
 
-This is the processor plugin for IDA Pro that adds the ability to analyze Solana Virtual Machine bytecode. Since SVM is based on the enhanced Berkeley Packet Filter (eBPF) and mostly uses the same instruction set, [this](https://github.com/zandi/eBPF_processor) eBPF processor plugin was used as a basis.
+Generic eBPF (ELF machine type 247, EM_BPF) processor module for IDA Pro.
 
-## How to use
+Derived from the open-source `solana-ebpf-ida-processor` project with all
+Solana-specific features removed:
 
-Install `requirements.txt`. Copy `solana-init.py` script and the `solana` folder to the directory `<ida pro installation>/procs` and select the processor on a Solana program file loading to IDA.
+- `BPF_PQR` class opcodes (lmul/uhmul/udiv/urem/shmul/sdiv/srem)
+- `BPF_HOR` opcode
+- `R_BPF_64_RELATIVE` relocation
+- `sol_*` syscall recognition in the disassembly output
+- `.data.rel.ro` Rust `{ptr, len}` string reference resolution
+- `rust_demangler` dependency
 
-To dump a program from Solana mainnet use the following command:
+## Installation
 
-```
-solana program dump <address of an account> <output file>
-```
+1. Copy `ebpf-init.py` into IDA's `procs/` directory.
+2. Copy the `ebpf/` package folder into `procs/` (same level as `ebpf-init.py`).
+3. Restart IDA. Load any eBPF ELF file (e.g. `clang -target bpf` output).
+   IDA will select the `eBPF` processor automatically.
 
-During the file import into IDA you may encounter the following error:
+Final layout:
 
-![](./img/1.png)
+    <IDA>/procs/
+    |- ebpf.py
+    \- ebpf/
+       |- __init__.py
+       |- config.py
+       |- constants.py
+       |- helpers.py
+       |- processor.py
+       |- relocations.py
+       \- strings.py
 
-This is because the Solana EBPF processor should be selected explicitly. Double-click on the processor name in the processor list and select it:
+## Dependencies
 
-![](./img/2.png)
+- IDA Pro 7.x / 8.x / 9.x
+- `pyelftools` (bundled with IDA, or `pip install pyelftools`)
 
-Then select Yes:
+## License
 
-![](./img/3.png)
-
-
-## FLIRT signatures
-
-Proceed to the [solana-ida-signatures-factory](https://github.com/PassKeyRa/solana-ida-signatures-factory) repository to generate function signatures.
-
-## What works now
-
-* Solana eBPF instructions disassembling, including function calls and jumps
-* Strings detection
-* Relocations detection
-* FLAIR preprocessor to generate PAT files with libs functions signatures
-
-## TODO
-
-* Parse and name Anchor functions and structures
-
-## Thanks
-
-Thanks to Clément Berthaux (clement (dot) berthaux (at) synacktiv (dot) com) and Michael Zandi (the (dot) zandi (at) gmail (dot) com) for developing the EBPF processor plugin, which is the base for this plugin.
+The original `processor.py` carries the Beer-Ware license, retained here.

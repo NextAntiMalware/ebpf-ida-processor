@@ -4,10 +4,10 @@ from elftools.elf.elffile import ELFFile
 from elftools.elf.relocation import RelocationSection
 from elftools.elf.sections import SymbolTableSection
 
-from solana.constants import REL_TYPE, REL_PATCH_SIZE
-from solana.config import STRINGS_PREVIEW_LIMIT
-from solana.strings import add_string
-from solana.helpers import decode_name
+from ebpf.constants import REL_TYPE, REL_PATCH_SIZE
+from ebpf.config import STRINGS_PREVIEW_LIMIT
+from ebpf.strings import add_string
+from ebpf.helpers import decode_name
 
 def parse_relocation(rel_type, loc, val):
     type_ = REL_TYPE[rel_type]
@@ -23,12 +23,23 @@ def parse_relocation(rel_type, loc, val):
         changes.append({'loc': loc, 'val': val & 0xFFFFFFFF})
     elif type_ == 'R_BPF_64_32':
         changes.append({'loc': loc + 4, 'val': val & 0xFFFFFFFF})
-    elif type_ == 'R_BPF_64_RELATIVE':
-        pass
     else:
         print(f'[WARN] unknown relocation type: {type_}')
     
     return changes
+
+def _sym_ea(sections, relsym):
+    """把符号解析成 IDA 地址：目标节基址 + st_value。"""
+    try:
+        shndx = relsym.get('shndx')
+        if not isinstance(shndx, int) or shndx <= 0 or shndx >= len(sections):
+            return None
+        s = sections[shndx]
+        ea = idaapi.get_fileregion_ea(s.header['sh_offset'] + relsym['val'])
+        return None if ea == idaapi.BADADDR else ea
+    except Exception:
+        return None
+
 
 def process_relocations(filename):
     with open(filename, 'rb') as f:
@@ -47,9 +58,15 @@ def process_relocations(filename):
 
         if symtab_s:
             for sym in symtab_s.iter_symbols():
-                symtab.append({'name': sym.name, 'val': sym.entry['st_value'], 'size': sym.entry['st_size']})
+                symtab.append({'name': sym.name, 'val': sym.entry['st_value'],
+                               'size': sym.entry['st_size'],
+                               'shndx': sym.entry['st_shndx']})
                     
         for s in sections:
+            # BTF 相关重定位与指令无关，跳过；它们引用的节 IDA 不加载，地址会是 BADADDR
+            if '.BTF' in s.name:
+                continue
+
             # dynamic
             if s.header['sh_type'] == 'SHT_REL' and s.name == '.rel.dyn':
                 dynsym = elffile.get_section_by_name(".dynsym")
@@ -59,7 +76,8 @@ def process_relocations(filename):
                 
                 symbols = []
                 for symbol in dynsym.iter_symbols():
-                    symbols.append({'name': symbol.name, 'val': symbol.entry['st_value']})
+                    symbols.append({'name': symbol.name, 'val': symbol.entry['st_value'],
+                                    'shndx': symbol.entry['st_shndx']})
                 
                 for reloc in s.iter_relocations():
                     relsym = symbols[reloc['r_info_sym']]
@@ -75,7 +93,8 @@ def process_relocations(filename):
                     relocation = {
                         'type': reloc['r_info_type'],
                         'name': name,
-                        'mods': mods
+                        'mods': mods,
+                        'target': _sym_ea(sections, relsym),
                     }
 
                     relocations[idaapi.get_fileregion_ea(reloc['r_offset'])] = relocation
@@ -111,7 +130,8 @@ def process_relocations(filename):
                     relocation = {
                         'type': reloc['r_info_type'],
                         'name': name,
-                        'mods': mods
+                        'mods': mods,
+                        'target': _sym_ea(sections, relsym),
                     }
 
                     relocations[idaapi.get_fileregion_ea(base_offset + reloc['r_offset'])] = relocation
@@ -129,69 +149,33 @@ def apply_rel_mods(mods, patch_size):
                 print('[ERROR] apply relocation: none type')
 
 def apply_relocation(functions, rodata, sorted_strings, insn, relocation):
-    if relocation['type'] == 8: # lddw usually
-        source_addr = insn[0].addr
-        target_addr = insn[1].value
-        seg = idaapi.getseg(target_addr)
-        if seg.sclass == 3: # CONST .data.rel.ro
-            # Resolve reference
-            try:
-                ref_addr = idaapi.get_dword(target_addr + 4)
-                ref_len = idaapi.get_dword(target_addr + 8)
-                seg_ = idaapi.getseg(ref_addr)
-                if seg_.sclass == 6: # CONST .rodata
-                    sorted_strings, len_ = add_string(sorted_strings, ref_addr, ref_len)
-                    name = idaapi.get_name(ref_addr)
-                    if name:
-                        idaapi.create_dword(target_addr, 4)
-                        idaapi.create_dword(target_addr + 4, 4)
-                        idaapi.create_dword(target_addr + 8, 4)
+    """应用一条重定位。
 
-                        idaapi.op_offset(target_addr + 4, 0, idaapi.REF_OFF32)
+    - R_BPF_64_32（call）：优先用 process_relocations 解析好的 target
+    - R_BPF_64_64（lddw）：把 map/全局符号的地址写进指令并加 dref
+    解析不了就跳过，绝不让空符号名导致 KeyError。
+    """
+    rtype = REL_TYPE.get(relocation.get('type'))
+    patch_size = REL_PATCH_SIZE.get(relocation.get('type'))
+    mods = relocation.get('mods') or []
+    name = relocation.get('name') or ''
 
-                        idaapi.set_name(target_addr, f"{name}_ref", idaapi.SN_FORCE)
-                        idaapi.set_name(target_addr + 4, f"{name}_ref_addr", idaapi.SN_FORCE)
-                        idaapi.set_name(target_addr + 8, f"{name}_ref_len", idaapi.SN_FORCE)
+    if rtype == 'R_BPF_64_32':  # call
+        target = relocation.get('target')
+        if target is None and name:
+            target = functions.get(name)
+        if target is not None:
+            insn.add_cref(target, insn[0].offb, idaapi.fl_CF)
+        return sorted_strings
 
-                        idaapi.add_dref(insn.ea, target_addr, idaapi.dr_O)
+    if patch_size:
+        apply_rel_mods(mods, patch_size)
 
-                        s = idaapi.get_strlit_contents(ref_addr, len_, idaapi.STRTYPE_TERMCHR).decode("utf-8", errors="ignore")
-                        s_preview = 'Ref to "' + s[:STRINGS_PREVIEW_LIMIT] + '"'
-                        if len(s) > STRINGS_PREVIEW_LIMIT:
-                            s_preview += "..."
-
-                        idaapi.set_cmt(source_addr, "", 0)
-                        idaapi.set_cmt(source_addr, s_preview, 0)
-                        
-                        
-            except Exception as e:
-                print(f'error during reference resolution: {e}')
-        elif seg.sclass == 4: # CONST .text
-            if not idaapi.get_func(target_addr):
-                idaapi.add_func(target_addr)
-            insn.add_cref(target_addr, insn[1].offb, idaapi.fl_CF)
-        elif seg.sclass == 6: # CONST .rodata
-            sorted_strings, len_ = add_string(sorted_strings, target_addr)
-            insn.add_dref(target_addr, insn[1].offb, idaapi.dr_R)
-        else:
-            print(f'unhandled sclass: {seg.sclass}')
-
-    patch_size = REL_PATCH_SIZE[relocation['type']]
-    apply_rel_mods(relocation['mods'], patch_size)
-    
-    if REL_TYPE[relocation['type']] == 'R_BPF_64_32': # call
-        if relocation['mods'][0]['val'] != 0: # internal function call
-            insn.add_cref(relocation['mods'][0]['val'], insn[0].offb, idaapi.fl_CF)
-            mods = parse_relocation(relocation['type'], insn.ea, relocation['mods'][0]['val'])
-            apply_rel_mods(mods, patch_size)
-        else:
-            insn.add_cref(functions[relocation['name']], insn[0].offb, idaapi.fl_CF)
-    
-    if REL_TYPE[relocation['type']] == 'R_BPF_64_64': # lddw
-        if relocation['name'] in rodata:
-            data_addr = rodata[relocation['name']]
-            mods = parse_relocation(relocation['type'], insn.ea, data_addr)
-            apply_rel_mods(mods, patch_size)
+    if rtype == 'R_BPF_64_64':  # lddw / map 引用
+        data_addr = rodata.get(name) or functions.get(name)
+        if data_addr:
+            m2 = parse_relocation(relocation['type'], insn.ea, data_addr)
+            apply_rel_mods(m2, patch_size)
             insn.add_dref(data_addr, insn[1].offb, idaapi.dr_R)
-    
+
     return sorted_strings
